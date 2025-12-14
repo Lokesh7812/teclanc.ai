@@ -17,6 +17,48 @@ const genAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
 
+// Rate limiting - track requests
+const requestTracker = {
+  requests: [] as number[],
+  maxRequestsPerMinute: 14, // Keep below 15 RPM limit
+  maxRequestsPerDay: 1400,  // Keep below 1500 daily limit
+};
+
+function canMakeRequest(): { allowed: boolean; waitTime?: number; reason?: string } {
+  const now = Date.now();
+  const oneMinuteAgo = now - 60 * 1000;
+  const oneDayAgo = now - 24 * 60 * 60 * 1000;
+
+  // Clean old requests
+  requestTracker.requests = requestTracker.requests.filter(time => time > oneDayAgo);
+
+  // Check per-minute limit
+  const recentRequests = requestTracker.requests.filter(time => time > oneMinuteAgo);
+  if (recentRequests.length >= requestTracker.maxRequestsPerMinute) {
+    const oldestRecent = Math.min(...recentRequests);
+    const waitTime = Math.ceil((oldestRecent + 60 * 1000 - now) / 1000);
+    return { 
+      allowed: false, 
+      waitTime, 
+      reason: `Rate limit: ${requestTracker.maxRequestsPerMinute} requests/minute. Please wait ${waitTime}s.` 
+    };
+  }
+
+  // Check daily limit
+  if (requestTracker.requests.length >= requestTracker.maxRequestsPerDay) {
+    return { 
+      allowed: false, 
+      reason: `Daily quota exceeded (${requestTracker.maxRequestsPerDay} requests/day). Try again tomorrow.` 
+    };
+  }
+
+  return { allowed: true };
+}
+
+function trackRequest() {
+  requestTracker.requests.push(Date.now());
+}
+
 const SYSTEM_PROMPT = `You are Teclanc.ai — an expert AI Website Builder.
 
 Your job is to generate COMPLETE, CLEAN, PRODUCTION-READY code based on the user's prompt.
@@ -78,6 +120,16 @@ export async function registerRoutes(
   // Generate website using OpenAI
   app.post("/api/generate", async (req, res) => {
     try {
+      // Check rate limits before processing
+      const rateLimitCheck = canMakeRequest();
+      if (!rateLimitCheck.allowed) {
+        return res.status(429).json({ 
+          error: rateLimitCheck.reason,
+          code: "RATE_LIMIT",
+          waitTime: rateLimitCheck.waitTime
+        });
+      }
+
       const validation = generateRequestSchema.safeParse(req.body);
       if (!validation.success) {
         return res.status(400).json({ 
@@ -87,11 +139,42 @@ export async function registerRoutes(
 
       const { prompt } = validation.data;
 
-      // Generate content using the Google GenAI API
-      const result = await genAI.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: `${SYSTEM_PROMPT}\n\n${prompt}`,
-      });
+      // Track this request
+      trackRequest();
+
+      // Generate content using the Google GenAI API with retry logic
+      let result;
+      let retries = 0;
+      const maxRetries = 2;
+      
+      while (retries <= maxRetries) {
+        try {
+          result = await genAI.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: `${SYSTEM_PROMPT}\n\n${prompt}`,
+          });
+          break; // Success, exit retry loop
+        } catch (apiError: any) {
+          retries++;
+          
+          // If it's a rate limit error and we have retries left, wait and retry
+          if ((apiError?.status === 429 || apiError?.message?.includes('rate limit')) && retries <= maxRetries) {
+            console.log(`Rate limit hit, retry ${retries}/${maxRetries} after 2s...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * retries));
+            continue;
+          }
+          
+          // Otherwise, throw the error
+          throw apiError;
+        }
+      }
+      
+      if (!result) {
+        return res.status(500).json({ 
+          error: "Failed to generate content after retries",
+          code: "GENERATION_FAILED"
+        });
+      }
       
       const generatedText = result.text;
       

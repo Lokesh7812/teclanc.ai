@@ -10,6 +10,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { CodeEditor } from "@/components/code-editor";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { Link } from "wouter";
 import type { Generation } from "@shared/schema";
 import { 
   Sparkles, 
@@ -28,7 +29,8 @@ import {
   Menu,
   X,
   Eye,
-  FileCode
+  FileCode,
+  User
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -46,6 +48,7 @@ export default function Home() {
   const [deviceMode, setDeviceMode] = useState<DeviceMode>('desktop');
   const [mobileView, setMobileView] = useState<MobileView>('prompt');
   const [showHistory, setShowHistory] = useState(false);
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
   const { toast } = useToast();
 
   const { data: generations = [], isLoading: historyLoading } = useQuery<Generation[]>({
@@ -58,7 +61,12 @@ export default function Home() {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         const errorMessage = errorData.error || "Failed to generate website";
-        throw new Error(errorMessage);
+        const errorCode = errorData.code;
+        const waitTime = errorData.waitTime;
+        const error: any = new Error(errorMessage);
+        error.code = errorCode;
+        error.waitTime = waitTime;
+        throw error;
       }
       return response.json();
     },
@@ -80,11 +88,28 @@ export default function Home() {
         description: "Your website is ready. You can preview, edit, and download it.",
       });
     },
-    onError: (error: Error) => {
+    onError: (error: any) => {
+      let title = "Generation failed";
+      let description = error.message || "Something went wrong. Please try again.";
+      
+      // Special handling for API key errors
+      if (error.code === 'INVALID_API_KEY') {
+        title = "🔑 API Key Required";
+        description = "Please set up your Gemini API key. Check SETUP.md for instructions. Get your free key at: aistudio.google.com/app/apikey";
+      } else if (error.code === 'RATE_LIMIT') {
+        title = "⏱️ Rate Limit Reached";
+        if (error.waitTime) {
+          description = `Gemini free tier limit reached. Please wait ${error.waitTime} seconds before trying again.`;
+        } else {
+          description = error.message || "Please wait a moment before trying again. The free tier has usage limits.";
+        }
+      }
+      
       toast({
-        title: "Generation failed",
-        description: error.message || "Something went wrong. Please try again.",
+        title,
+        description,
         variant: "destructive",
+        duration: error.waitTime ? (error.waitTime * 1000 + 2000) : 5000,
       });
     },
   });
@@ -282,21 +307,34 @@ ${editableJs}
                 variant="outline"
                 size="sm"
                 onClick={handleDownloadZip}
+                className="hidden lg:flex"
                 data-testid="button-download-zip-header"
               >
                 <FileArchive className="w-4 h-4 md:mr-2" />
-                <span className="hidden md:inline">ZIP</span>
+                <span className="hidden xl:inline">ZIP</span>
               </Button>
             </>
           )}
           <Button
             variant="outline"
             size="sm"
+            asChild
+            className="gap-2"
+          >
+            <Link href="/about">
+              <User className="w-4 h-4" />
+              <span className="hidden lg:inline">About</span>
+            </Link>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleNewGeneration}
+            className="gap-2"
             data-testid="button-new-generation"
           >
-            <Plus className="w-4 h-4 md:mr-2" />
-            <span className="hidden md:inline">New</span>
+            <Plus className="w-4 h-4" />
+            <span className="hidden lg:inline">New</span>
           </Button>
           <ThemeToggle />
         </div>
@@ -324,12 +362,100 @@ ${editableJs}
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setShowHistory(!showHistory)}
+            onClick={() => setShowMobileMenu(!showMobileMenu)}
+            data-testid="button-mobile-menu"
           >
-            <History className="w-4 h-4" />
+            {showMobileMenu ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </Button>
         </div>
       </header>
+
+      {/* Mobile Menu Drawer */}
+      {showMobileMenu && (
+        <div className="md:hidden fixed inset-0 z-50 bg-background/80 backdrop-blur-sm" onClick={() => setShowMobileMenu(false)}>
+          <div 
+            className="absolute right-0 top-0 h-full w-64 bg-background border-l shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex flex-col h-full">
+              {/* Menu Header */}
+              <div className="flex items-center justify-between px-4 h-14 border-b">
+                <span className="font-semibold">Menu</span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowMobileMenu(false)}
+                >
+                  <X className="w-5 h-5" />
+                </Button>
+              </div>
+
+              {/* Menu Items */}
+              <nav className="flex-1 overflow-y-auto p-4">
+                <div className="flex flex-col gap-2">
+                  {/* About Link */}
+                  <Button
+                    variant="ghost"
+                    className="w-full justify-start h-12 text-base"
+                    asChild
+                    onClick={() => setShowMobileMenu(false)}
+                  >
+                    <Link href="/about">
+                      <User className="w-5 h-5 mr-3" />
+                      About
+                    </Link>
+                  </Button>
+
+                  {/* New Generation */}
+                  <Button
+                    variant="ghost"
+                    className="w-full justify-start h-12 text-base"
+                    onClick={() => {
+                      handleNewGeneration();
+                      setShowMobileMenu(false);
+                    }}
+                    data-testid="button-new-mobile-menu"
+                  >
+                    <Plus className="w-5 h-5 mr-3" />
+                    New Generation
+                  </Button>
+
+                  {/* History */}
+                  <Button
+                    variant="ghost"
+                    className="w-full justify-start h-12 text-base"
+                    onClick={() => {
+                      setShowHistory(true);
+                      setShowMobileMenu(false);
+                    }}
+                  >
+                    <History className="w-5 h-5 mr-3" />
+                    History
+                  </Button>
+
+                  {/* Divider */}
+                  <div className="border-t my-2"></div>
+
+                  {/* Theme Toggle */}
+                  <div className="px-3 py-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Theme</span>
+                      <ThemeToggle />
+                    </div>
+                  </div>
+                </div>
+              </nav>
+
+              {/* Menu Footer */}
+              <div className="border-t p-4">
+                <p className="text-xs text-muted-foreground text-center">
+                  Teclanc.AI v1.0
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex flex-1 overflow-hidden relative">
         {/* History Sidebar - Desktop/Tablet */}

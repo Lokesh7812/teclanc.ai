@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,6 +7,7 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { CodeEditor } from "@/components/code-editor";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Generation } from "@shared/schema";
@@ -19,13 +20,18 @@ import {
   Code2, 
   Loader2,
   ExternalLink,
-  Clock
+  Clock,
+  FileArchive
 } from "lucide-react";
 import { format } from "date-fns";
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [currentHtml, setCurrentHtml] = useState<string | null>(null);
+  const [currentGeneration, setCurrentGeneration] = useState<Generation | null>(null);
+  const [editableHtml, setEditableHtml] = useState("");
+  const [editableCss, setEditableCss] = useState("");
+  const [editableJs, setEditableJs] = useState("");
   const [progress, setProgress] = useState(0);
   const { toast } = useToast();
 
@@ -45,10 +51,20 @@ export default function Home() {
     },
     onSuccess: (data: Generation) => {
       setCurrentHtml(data.generatedHtml);
+      setCurrentGeneration(data);
+      
+      // Extract HTML body content
+      const bodyMatch = data.generatedHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+      const htmlContent = bodyMatch ? bodyMatch[1].trim() : data.generatedHtml;
+      
+      setEditableHtml(htmlContent);
+      setEditableCss(data.generatedCss || '');
+      setEditableJs(data.generatedJs || '');
+      
       queryClient.invalidateQueries({ queryKey: ["/api/generations"] });
       toast({
         title: "Website generated!",
-        description: "Your website is ready. You can preview and download it.",
+        description: "Your website is ready. You can preview, edit, and download it.",
       });
     },
     onError: (error: Error) => {
@@ -130,12 +146,65 @@ export default function Home() {
   const handleLoadGeneration = useCallback((generation: Generation) => {
     setPrompt(generation.prompt);
     setCurrentHtml(generation.generatedHtml);
+    setCurrentGeneration(generation);
+    
+    // Extract HTML body content
+    const bodyMatch = generation.generatedHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+    const htmlContent = bodyMatch ? bodyMatch[1].trim() : generation.generatedHtml;
+    
+    setEditableHtml(htmlContent);
+    setEditableCss(generation.generatedCss || '');
+    setEditableJs(generation.generatedJs || '');
   }, []);
 
   const handleNewGeneration = useCallback(() => {
     setPrompt("");
     setCurrentHtml(null);
+    setCurrentGeneration(null);
+    setEditableHtml("");
+    setEditableCss("");
+    setEditableJs("");
   }, []);
+
+  const handleDownloadZip = useCallback(() => {
+    if (!currentGeneration) return;
+    
+    // Create a link to trigger download
+    const link = document.createElement('a');
+    link.href = `/api/download/${currentGeneration.id}`;
+    link.download = `website-${currentGeneration.id}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    toast({
+      title: "Downloading...",
+      description: "Your website is being downloaded as a ZIP file.",
+    });
+  }, [currentGeneration, toast]);
+
+  // Live preview based on editable code
+  const livePreview = useMemo(() => {
+    if (!editableHtml && !currentHtml) return null;
+    
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Preview</title>
+  <style>
+${editableCss}
+  </style>
+</head>
+<body>
+${editableHtml}
+  <script>
+${editableJs}
+  </script>
+</body>
+</html>`;
+  }, [editableHtml, editableCss, editableJs, currentHtml]);
 
   const truncatePrompt = (text: string, maxLength = 60) => {
     if (text.length <= maxLength) return text;
@@ -276,32 +345,6 @@ export default function Home() {
               </div>
             )}
 
-            {currentHtml && (
-              <div className="absolute top-4 right-4 z-10 flex gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleDownload}
-                  data-testid="button-download"
-                >
-                  <Download className="w-4 h-4 mr-2" />
-                  Download
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="icon"
-                  onClick={() => {
-                    const blob = new Blob([currentHtml], { type: "text/html" });
-                    const url = URL.createObjectURL(blob);
-                    window.open(url, "_blank");
-                  }}
-                  data-testid="button-open-new-tab"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </Button>
-              </div>
-            )}
-
             {generateMutation.isPending ? (
               <div className="flex flex-col items-center justify-center flex-1 gap-4">
                 <div className="relative">
@@ -316,13 +359,79 @@ export default function Home() {
                 </div>
               </div>
             ) : currentHtml ? (
-              <iframe
-                srcDoc={currentHtml}
-                className="flex-1 w-full h-full border-0 bg-white"
-                sandbox="allow-scripts"
-                title="Website Preview"
-                data-testid="iframe-preview"
-              />
+              <div className="flex flex-col lg:flex-row h-full">
+                {/* Code Editor Panel */}
+                <div className="flex flex-col w-full lg:w-1/2 border-b lg:border-b-0 lg:border-r min-h-[50vh] lg:min-h-0">
+                  <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/30">
+                    <div className="flex items-center gap-2">
+                      <Code2 className="w-4 h-4 text-muted-foreground" />
+                      <span className="text-sm font-medium">Source Code</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleDownload}
+                        data-testid="button-download-html"
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        HTML
+                      </Button>
+                      <Button
+                        variant="default"
+                        size="sm"
+                        onClick={handleDownloadZip}
+                        data-testid="button-download-zip"
+                      >
+                        <FileArchive className="w-4 h-4 mr-2" />
+                        Download ZIP
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex-1 overflow-hidden">
+                    <CodeEditor
+                      html={editableHtml}
+                      css={editableCss}
+                      js={editableJs}
+                      onHtmlChange={setEditableHtml}
+                      onCssChange={setEditableCss}
+                      onJsChange={setEditableJs}
+                    />
+                  </div>
+                </div>
+
+                {/* Preview Panel */}
+                <div className="relative flex flex-col w-full lg:w-1/2 min-h-[50vh] lg:min-h-0">
+                  <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/30">
+                    <div className="flex items-center gap-2">
+                      <ExternalLink className="w-4 h-4 text-muted-foreground" />
+                      <span className="text-sm font-medium">Live Preview</span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (livePreview) {
+                          const blob = new Blob([livePreview], { type: "text/html" });
+                          const url = URL.createObjectURL(blob);
+                          window.open(url, "_blank");
+                        }
+                      }}
+                      data-testid="button-open-new-tab"
+                    >
+                      <ExternalLink className="w-4 h-4 mr-2" />
+                      Open in New Tab
+                    </Button>
+                  </div>
+                  <iframe
+                    srcDoc={livePreview || ''}
+                    className="flex-1 w-full h-full border-0 bg-white"
+                    sandbox="allow-scripts"
+                    title="Website Preview"
+                    data-testid="iframe-preview"
+                  />
+                </div>
+              </div>
             ) : (
               <div className="flex flex-col items-center justify-center flex-1 gap-4 p-8">
                 <div className="w-20 h-20 rounded-full bg-muted flex items-center justify-center">

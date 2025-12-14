@@ -20,6 +20,8 @@ export const generations = pgTable("generations", {
   id: varchar("id", { length: 36 }).primaryKey(),
   prompt: text("prompt").notNull(),
   generatedHtml: text("generated_html").notNull(),
+  generatedCss: text("generated_css"),
+  generatedJs: text("generated_js"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

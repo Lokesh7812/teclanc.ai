@@ -54,6 +54,8 @@ export class MemStorage implements IStorage {
     const generation: Generation = {
       ...insertGeneration,
       id,
+      generatedCss: insertGeneration.generatedCss || null,
+      generatedJs: insertGeneration.generatedJs || null,
       createdAt: new Date(),
     };
     this.generations.set(id, generation);

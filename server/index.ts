@@ -60,7 +60,9 @@ app.use((req, res, next) => {
 
   next();
 });
-
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
 (async () => {
   await registerRoutes(httpServer, app);
 
@@ -98,3 +100,5 @@ app.use((req, res, next) => {
     },
   );
 })();
+
+

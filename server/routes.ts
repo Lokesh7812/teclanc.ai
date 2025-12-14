@@ -2,10 +2,12 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { generateRequestSchema } from "@shared/schema";
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
-// the newest OpenAI model is "gpt-5" which was released August 7, 2025. do not change this unless explicitly requested by the user
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// DON'T DELETE THIS COMMENT
+// Using Gemini AI - the newest model series is "gemini-2.5-flash"
+// do not change this unless explicitly requested by the user
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 const SYSTEM_PROMPT = `You are Teclanc.ai — an expert AI Website Builder.
 
@@ -68,16 +70,15 @@ export async function registerRoutes(
 
       const { prompt } = validation.data;
 
-      const response = await openai.chat.completions.create({
-        model: "gpt-5",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt }
-        ],
-        max_completion_tokens: 8192,
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+        },
+        contents: prompt,
       });
 
-      const generatedHtml = response.choices[0]?.message?.content;
+      const generatedHtml = response.text;
       
       if (!generatedHtml) {
         return res.status(500).json({ error: "Failed to generate website content" });
@@ -105,24 +106,19 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Generation error:", error);
       
-      // Handle specific OpenAI errors
-      if (error?.status === 429 || error?.code === 'rate_limit_exceeded') {
+      // Handle specific Gemini errors
+      const errorMessage = error?.message?.toLowerCase() || '';
+      
+      if (errorMessage.includes('rate limit') || errorMessage.includes('quota') || error?.status === 429) {
         return res.status(429).json({ 
           error: "Rate limit exceeded. Please wait a moment and try again.",
           code: "RATE_LIMIT"
         });
       }
       
-      if (error?.code === 'insufficient_quota') {
-        return res.status(402).json({ 
-          error: "OpenAI API quota exceeded. Please check your billing details.",
-          code: "QUOTA_EXCEEDED"
-        });
-      }
-
-      if (error?.status === 401 || error?.code === 'invalid_api_key') {
+      if (errorMessage.includes('api key') || error?.status === 401 || error?.status === 403) {
         return res.status(401).json({ 
-          error: "Invalid API key. Please check your OpenAI API key configuration.",
+          error: "Invalid API key. Please check your Gemini API key configuration.",
           code: "INVALID_API_KEY"
         });
       }

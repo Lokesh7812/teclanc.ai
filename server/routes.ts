@@ -2,26 +2,25 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { generateRequestSchema } from "@shared/schema";
-import { GoogleGenAI } from "@google/genai";
 import archiver from "archiver";
 import { Readable } from "stream";
 
-// DON'T DELETE THIS COMMENT
-// Using Gemini AI - the newest model series is "gemini-2.5-flash"
-// do not change this unless explicitly requested by the user
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error("GEMINI_API_KEY is missing. Check your .env file");
+// OpenRouter API Configuration
+if (!process.env.OPENROUTER_API_KEY) {
+  throw new Error("OPENROUTER_API_KEY is missing. Check your .env file");
 }
 
-const genAI = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY
-});
+const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-// Rate limiting - track requests
+// Use the officially recommended free model from memory
+// google/gemini-2.5-flash is confirmed to work with OpenRouter
+const FREE_MODEL = 'google/gemini-2.5-flash';
+
+// Rate limiting - track requests (adjusted for better model)
 const requestTracker = {
   requests: [] as number[],
-  maxRequestsPerMinute: 14, // Keep below 15 RPM limit
-  maxRequestsPerDay: 1400,  // Keep below 1500 daily limit
+  maxRequestsPerMinute: 8, // Reasonable limit for free tier
+  maxRequestsPerDay: 150,  // Daily limit for free tier
 };
 
 function canMakeRequest(): { allowed: boolean; waitTime?: number; reason?: string } {
@@ -59,58 +58,26 @@ function trackRequest() {
   requestTracker.requests.push(Date.now());
 }
 
-const SYSTEM_PROMPT = `You are Teclanc.ai — an expert AI Website Builder.
+const SYSTEM_PROMPT = `You are an AI code generator. Return ONLY valid JSON. No markdown, no explanations.
 
-Your job is to generate COMPLETE, CLEAN, PRODUCTION-READY code based on the user's prompt.
-
-CRITICAL OUTPUT FORMAT:
-You MUST return ONLY a valid JSON object with this EXACT structure:
-
+FORMAT (mandatory):
 {
-  "html": "<!-- full HTML code here -->",
-  "css": "/* full CSS code here */",
-  "js": "// full JavaScript code here"
+  "files": {
+    "index.html": "<complete HTML>",
+    "style.css": "<complete CSS>",
+    "script.js": "<complete JS>"
+  }
 }
 
-STRICT RULES:
-1. Output ONLY valid JSON. No markdown. No explanations. No text before or after.
-2. Do NOT use code blocks or backticks.
-3. HTML must be complete (<!DOCTYPE html>, <html>, <head>, <body>).
-4. CSS should be comprehensive styling.
-5. JavaScript should be functional and complete.
-6. Use only vanilla HTML, CSS, and JavaScript.
-7. No frameworks, no libraries, no CDN links.
-8. Code must be responsive and modern.
-9. Use clean layouts, good spacing, modern colors, and readable fonts.
-10. Use semantic HTML (header, section, footer, etc.).
-11. Ensure the website works immediately when files are linked together.
+RULES:
+- Output ONLY this JSON. Nothing else.
+- NO markdown code blocks (no \`\`\`)
+- HTML: complete semantic structure
+- CSS: modern, responsive styling
+- JS: functional vanilla JavaScript
+- Mobile-first design
 
-WEBSITE GENERATION LOGIC:
-- If the user asks for a portfolio → generate a full portfolio website.
-- If the user asks for a business site → generate a business landing page.
-- If the user asks for a form → include form validation using JavaScript.
-- If the user asks for animations → use CSS animations only.
-- If the user asks for interactivity → use JavaScript.
-
-DEFAULT SECTIONS (when applicable):
-- Header with navigation
-- Hero section
-- Content sections based on prompt
-- Contact section
-- Footer
-
-DESIGN STYLE:
-- Modern
-- Minimal
-- Professional
-- Mobile-first
-- Smooth hover effects
-
-ERROR HANDLING:
-- If the prompt is unclear, make reasonable assumptions and proceed.
-- Never ask questions. Always generate a complete website.
-
-REMEMBER: Return ONLY the JSON object. Nothing else.`;
+Generate based on user request.`;
 
 export async function registerRoutes(
   httpServer: Server,
@@ -142,48 +109,132 @@ export async function registerRoutes(
       // Track this request
       trackRequest();
 
-      // Generate content using the Google GenAI API with retry logic
-      let result;
-      let retries = 0;
-      const maxRetries = 2;
+      // Generate content using OpenRouter API
+      // Retry logic: Try once, if 429 wait 5s and retry once more
+      let generatedText: string | undefined;
+      let lastError: any;
       
-      while (retries <= maxRetries) {
-        try {
-          result = await genAI.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: `${SYSTEM_PROMPT}\n\n${prompt}`,
-          });
-          break; // Success, exit retry loop
-        } catch (apiError: any) {
-          retries++;
+      // Try initial request
+      try {
+        console.log(`Calling OpenRouter API with model: ${FREE_MODEL}`);
+        
+        const response = await fetch(OPENROUTER_API_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://teclanc.ai',
+            'X-Title': 'Teclanc AI Website Builder'
+          },
+          body: JSON.stringify({
+            model: FREE_MODEL,
+            max_tokens: 8192,  // Limit tokens to stay within free tier
+            messages: [
+              {
+                role: 'system',
+                content: SYSTEM_PROMPT
+              },
+              {
+                role: 'user',
+                content: prompt
+              }
+            ]
+          })
+        });
+
+        // Handle HTTP errors
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          const error: any = new Error(errorData.error?.message || `HTTP ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+
+        const data = await response.json();
+        generatedText = data.choices?.[0]?.message?.content;
+        
+        if (!generatedText) {
+          throw new Error('Empty response from API');
+        }
+        
+      } catch (apiError: any) {
+        lastError = apiError;
+        
+        // If it's a 429 rate limit error, wait and retry ONCE
+        if (apiError?.status === 429) {
+          console.log('Rate limit (429) detected. Waiting 5 seconds before retry...');
           
-          // If it's a rate limit error and we have retries left, wait and retry
-          if ((apiError?.status === 429 || apiError?.message?.includes('rate limit')) && retries <= maxRetries) {
-            console.log(`Rate limit hit, retry ${retries}/${maxRetries} after 2s...`);
-            await new Promise(resolve => setTimeout(resolve, 2000 * retries));
-            continue;
+          // Wait 5 seconds
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          
+          // Retry once
+          try {
+            console.log('Retrying API call after rate limit...');
+            
+            const retryResponse = await fetch(OPENROUTER_API_URL, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://teclanc.ai',
+                'X-Title': 'Teclanc AI Website Builder'
+              },
+              body: JSON.stringify({
+                model: FREE_MODEL,
+                max_tokens: 8192,  // Limit tokens to stay within free tier
+                messages: [
+                  {
+                    role: 'system',
+                    content: SYSTEM_PROMPT
+                  },
+                  {
+                    role: 'user',
+                    content: prompt
+                  }
+                ]
+              })
+            });
+
+            if (!retryResponse.ok) {
+              const errorData = await retryResponse.json().catch(() => ({}));
+              const error: any = new Error(errorData.error?.message || `HTTP ${retryResponse.status}`);
+              error.status = retryResponse.status;
+              throw error;
+            }
+
+            const retryData = await retryResponse.json();
+            generatedText = retryData.choices?.[0]?.message?.content;
+            
+            if (!generatedText) {
+              throw new Error('Empty response from API');
+            }
+            
+            console.log('Retry successful!');
+            
+          } catch (retryError: any) {
+            // Retry failed, use this error
+            lastError = retryError;
+            console.error('Retry failed:', retryError.message);
           }
-          
-          // Otherwise, throw the error
-          throw apiError;
+        }
+        
+        // If we still don't have generated text, throw the last error
+        if (!generatedText) {
+          throw lastError;
         }
       }
       
-      if (!result) {
+      if (!generatedText) {
         return res.status(500).json({ 
-          error: "Failed to generate content after retries",
-          code: "GENERATION_FAILED"
+          error: "AI returned empty response. Please retry.",
+          code: "EMPTY_RESPONSE"
         });
       }
-      
-      const generatedText = result.text;
-      
-      if (!generatedText) {
-        return res.status(500).json({ error: "Failed to generate website content" });
-      }
 
-      // Clean up the response - remove any markdown code blocks if present
+      // STEP 1: Clean up the response - remove markdown code blocks if present
       let cleanText = generatedText.trim();
+      
+      // Remove ```json and ``` markers
       if (cleanText.startsWith("```json")) {
         cleanText = cleanText.slice(7);
       } else if (cleanText.startsWith("```")) {
@@ -193,24 +244,86 @@ export async function registerRoutes(
         cleanText = cleanText.slice(0, -3);
       }
       cleanText = cleanText.trim();
-
-      // Parse JSON response
-      let parsedCode: { html: string; css: string; js: string };
+      
+      // CRITICAL: Try to fix common JSON issues before parsing
+      // Sometimes AI returns JSON with unescaped newlines in string values
+      // This attempts to parse and stringify to normalize the JSON
       try {
-        parsedCode = JSON.parse(cleanText);
-        if (!parsedCode.html || typeof parsedCode.html !== 'string') {
-          throw new Error('Invalid JSON structure: missing html field');
+        // If the JSON has literal newlines inside strings, they need to be escaped
+        // Attempt a lenient parse by escaping common control characters
+        const jsonWithEscapedControlChars = cleanText
+          .replace(/(?<!\\)\n/g, '\\n')  // Escape unescaped newlines
+          .replace(/(?<!\\)\r/g, '\\r')  // Escape unescaped carriage returns
+          .replace(/(?<!\\)\t/g, '\\t'); // Escape unescaped tabs
+        
+        // Try parsing the cleaned version
+        JSON.parse(jsonWithEscapedControlChars);
+        cleanText = jsonWithEscapedControlChars;
+      } catch (e) {
+        // If that fails, continue with original cleanText
+        console.log('[JSON CLEANUP] Could not pre-process JSON, using as-is');
+      }
+
+      // STEP 2: Parse JSON response with strict validation and fallback support
+      let parsedResponse: { files: { "index.html": string; "style.css": string; "script.js": string } };
+      try {
+        // First, try parsing as-is
+        const rawParsed = JSON.parse(cleanText);
+        
+        // Check if it's the new format {files: {...}}
+        if (rawParsed.files && typeof rawParsed.files === 'object') {
+          parsedResponse = rawParsed;
+          
+          // Validate required fields
+          if (!parsedResponse.files["index.html"] || typeof parsedResponse.files["index.html"] !== 'string') {
+            throw new Error('Missing or invalid "index.html" in files');
+          }
+          
+          // Optional fields - set defaults if missing
+          if (!parsedResponse.files["style.css"]) {
+            parsedResponse.files["style.css"] = '';
+          }
+          if (!parsedResponse.files["script.js"]) {
+            parsedResponse.files["script.js"] = '';
+          }
+          
+        // Fallback: Check if it's the old format {html, css, js}
+        } else if (rawParsed.html || rawParsed.css || rawParsed.js) {
+          console.log('[BACKWARD COMPAT] Converting old format to new format');
+          parsedResponse = {
+            files: {
+              "index.html": rawParsed.html || '',
+              "style.css": rawParsed.css || '',
+              "script.js": rawParsed.js || ''
+            }
+          };
+        } else {
+          throw new Error('Response does not match any expected format');
         }
+        
       } catch (parseError: any) {
-        console.error("JSON Parse error:", parseError);
-        console.error("Raw response:", cleanText.substring(0, 500));
+        console.error("[JSON PARSE ERROR]", parseError.message);
+        console.error("[RAW RESPONSE]", cleanText.substring(0, 500));
+        
         return res.status(500).json({ 
-          error: "AI returned invalid format. Please try again.",
+          error: "AI response format error. Please retry.",
           code: "INVALID_FORMAT"
         });
       }
 
-      // Create combined HTML for backward compatibility
+      // STEP 3: Extract files and create backward-compatible structure
+      const htmlContent = parsedResponse.files["index.html"];
+      const cssContent = parsedResponse.files["style.css"] || '';
+      const jsContent = parsedResponse.files["script.js"] || '';
+      
+      // Extract HTML body content for storage (remove DOCTYPE, html, head, body tags if present)
+      let bodyContent = htmlContent;
+      const bodyMatch = htmlContent.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+      if (bodyMatch) {
+        bodyContent = bodyMatch[1].trim();
+      }
+
+      // STEP 4: Create combined HTML for preview (backward compatibility)
       const combinedHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -218,43 +331,51 @@ export async function registerRoutes(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Generated Website</title>
   <style>
-${parsedCode.css || ''}
+${cssContent}
   </style>
 </head>
 <body>
-${parsedCode.html}
+${bodyContent}
   <script>
-${parsedCode.js || ''}
+${jsContent}
   </script>
 </body>
 </html>`;
 
-      // Save to storage
+      // STEP 5: Save to storage
       const generation = await storage.createGeneration({
         prompt,
         generatedHtml: combinedHtml,
-        generatedCss: parsedCode.css || '',
-        generatedJs: parsedCode.js || '',
+        generatedCss: cssContent,
+        generatedJs: jsContent,
       });
 
       return res.json(generation);
     } catch (error: any) {
       console.error("Generation error:", error);
       
-      // Handle specific Gemini errors
+      // Handle specific API errors
       const errorMessage = error?.message?.toLowerCase() || '';
       
+      // 429 Rate Limit - User-friendly message
       if (errorMessage.includes('rate limit') || errorMessage.includes('quota') || error?.status === 429) {
         return res.status(429).json({ 
-          error: "Rate limit exceeded. Please wait a moment and try again.",
+          error: "Too many requests. Please wait 30-60 seconds and try again.",
           code: "RATE_LIMIT"
         });
       }
       
       if (errorMessage.includes('api key') || error?.status === 401 || error?.status === 403) {
         return res.status(401).json({ 
-          error: "Invalid API key. Please check your Gemini API key configuration.",
+          error: "Invalid API key. Please check your OpenRouter API key configuration.",
           code: "INVALID_API_KEY"
+        });
+      }
+      
+      if (errorMessage.includes('empty response') || error?.code === 'EMPTY_RESPONSE') {
+        return res.status(500).json({ 
+          error: "AI returned an empty response. Please try again.",
+          code: "EMPTY_RESPONSE"
         });
       }
 

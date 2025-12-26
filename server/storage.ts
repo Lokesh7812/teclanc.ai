@@ -5,7 +5,7 @@ export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
-  
+
   getGenerations(): Promise<Generation[]>;
   getGeneration(id: string): Promise<Generation | undefined>;
   createGeneration(generation: InsertGeneration): Promise<Generation>;
@@ -40,7 +40,7 @@ export class MemStorage implements IStorage {
 
   async getGenerations(): Promise<Generation[]> {
     const generations = Array.from(this.generations.values());
-    return generations.sort((a, b) => 
+    return generations.sort((a, b) =>
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   }
@@ -56,6 +56,7 @@ export class MemStorage implements IStorage {
       id,
       generatedCss: insertGeneration.generatedCss || null,
       generatedJs: insertGeneration.generatedJs || null,
+      files: insertGeneration.files || "[]",
       createdAt: new Date(),
     };
     this.generations.set(id, generation);

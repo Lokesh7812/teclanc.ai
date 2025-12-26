@@ -14,7 +14,10 @@ const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 // Use the officially recommended free model from memory
 // google/gemini-2.5-flash is confirmed to work with OpenRouter
+// google/gemini-2.5-flash is confirmed to work with OpenRouter
+// google/gemini-2.5-flash is confirmed to work with OpenRouter
 const FREE_MODEL = 'google/gemini-2.5-flash';
+const MAX_TOKENS = 6000; // Decreased to safe limit to avoid 402 errors
 
 // Rate limiting - track requests (adjusted for better model)
 const requestTracker = {
@@ -36,18 +39,18 @@ function canMakeRequest(): { allowed: boolean; waitTime?: number; reason?: strin
   if (recentRequests.length >= requestTracker.maxRequestsPerMinute) {
     const oldestRecent = Math.min(...recentRequests);
     const waitTime = Math.ceil((oldestRecent + 60 * 1000 - now) / 1000);
-    return { 
-      allowed: false, 
-      waitTime, 
-      reason: `Rate limit: ${requestTracker.maxRequestsPerMinute} requests/minute. Please wait ${waitTime}s.` 
+    return {
+      allowed: false,
+      waitTime,
+      reason: `Rate limit: ${requestTracker.maxRequestsPerMinute} requests/minute. Please wait ${waitTime}s.`
     };
   }
 
   // Check daily limit
   if (requestTracker.requests.length >= requestTracker.maxRequestsPerDay) {
-    return { 
-      allowed: false, 
-      reason: `Daily quota exceeded (${requestTracker.maxRequestsPerDay} requests/day). Try again tomorrow.` 
+    return {
+      allowed: false,
+      reason: `Daily quota exceeded (${requestTracker.maxRequestsPerDay} requests/day). Try again tomorrow.`
     };
   }
 
@@ -58,39 +61,35 @@ function trackRequest() {
   requestTracker.requests.push(Date.now());
 }
 
-const SYSTEM_PROMPT = `You are an AI code generator. Return ONLY valid JSON. No markdown, no explanations.
-
-FORMAT (mandatory):
+const SYSTEM_PROMPT = `You are an AI code generator. Return ONLY valid JSON. No markdown.
+FORMAT:
 {
   "files": {
-    "index.html": "<complete HTML>",
-    "style.css": "<complete CSS>",
-    "script.js": "<complete JS>"
+    "index.html": "<html...>",
+    "style.css": "<css...>",
+    "script.js": "<js...>"
   }
 }
-
 RULES:
-- Output ONLY this JSON. Nothing else.
-- NO markdown code blocks (no \`\`\`)
-- HTML: complete semantic structure
-- CSS: modern, responsive styling
-- JS: functional vanilla JavaScript
-- Mobile-first design
-
-Generate based on user request.`;
+- JSON ONLY. No \`\`\` wrappers.
+- HTML: Semantic but concise.
+- CSS: MINIFIED (no whitespace/comments). Modern & responsive.
+- JS: MINIFIED (no whitespace/comments). Functional.
+- Mobile-first.
+- CRITICAL: Keep output under 7000 tokens to avoid truncation.`;
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  
+
   // Generate website using OpenAI
   app.post("/api/generate", async (req, res) => {
     try {
       // Check rate limits before processing
       const rateLimitCheck = canMakeRequest();
       if (!rateLimitCheck.allowed) {
-        return res.status(429).json({ 
+        return res.status(429).json({
           error: rateLimitCheck.reason,
           code: "RATE_LIMIT",
           waitTime: rateLimitCheck.waitTime
@@ -99,8 +98,8 @@ export async function registerRoutes(
 
       const validation = generateRequestSchema.safeParse(req.body);
       if (!validation.success) {
-        return res.status(400).json({ 
-          error: validation.error.errors[0]?.message || "Invalid request" 
+        return res.status(400).json({
+          error: validation.error.errors[0]?.message || "Invalid request"
         });
       }
 
@@ -113,11 +112,11 @@ export async function registerRoutes(
       // Retry logic: Try once, if 429 wait 5s and retry once more
       let generatedText: string | undefined;
       let lastError: any;
-      
+
       // Try initial request
       try {
         console.log(`Calling OpenRouter API with model: ${FREE_MODEL}`);
-        
+
         const response = await fetch(OPENROUTER_API_URL, {
           method: 'POST',
           headers: {
@@ -128,7 +127,7 @@ export async function registerRoutes(
           },
           body: JSON.stringify({
             model: FREE_MODEL,
-            max_tokens: 8192,  // Limit tokens to stay within free tier
+            max_tokens: MAX_TOKENS,
             messages: [
               {
                 role: 'system',
@@ -152,25 +151,25 @@ export async function registerRoutes(
 
         const data = await response.json();
         generatedText = data.choices?.[0]?.message?.content;
-        
+
         if (!generatedText) {
           throw new Error('Empty response from API');
         }
-        
+
       } catch (apiError: any) {
         lastError = apiError;
-        
+
         // If it's a 429 rate limit error, wait and retry ONCE
         if (apiError?.status === 429) {
           console.log('Rate limit (429) detected. Waiting 5 seconds before retry...');
-          
+
           // Wait 5 seconds
           await new Promise(resolve => setTimeout(resolve, 5000));
-          
+
           // Retry once
           try {
             console.log('Retrying API call after rate limit...');
-            
+
             const retryResponse = await fetch(OPENROUTER_API_URL, {
               method: 'POST',
               headers: {
@@ -181,7 +180,7 @@ export async function registerRoutes(
               },
               body: JSON.stringify({
                 model: FREE_MODEL,
-                max_tokens: 8192,  // Limit tokens to stay within free tier
+                max_tokens: MAX_TOKENS,
                 messages: [
                   {
                     role: 'system',
@@ -204,28 +203,28 @@ export async function registerRoutes(
 
             const retryData = await retryResponse.json();
             generatedText = retryData.choices?.[0]?.message?.content;
-            
+
             if (!generatedText) {
               throw new Error('Empty response from API');
             }
-            
+
             console.log('Retry successful!');
-            
+
           } catch (retryError: any) {
             // Retry failed, use this error
             lastError = retryError;
             console.error('Retry failed:', retryError.message);
           }
         }
-        
+
         // If we still don't have generated text, throw the last error
         if (!generatedText) {
           throw lastError;
         }
       }
-      
+
       if (!generatedText) {
-        return res.status(500).json({ 
+        return res.status(500).json({
           error: "AI returned empty response. Please retry.",
           code: "EMPTY_RESPONSE"
         });
@@ -233,7 +232,7 @@ export async function registerRoutes(
 
       // STEP 1: Clean up the response - remove markdown code blocks if present
       let cleanText = generatedText.trim();
-      
+
       // Remove ```json and ``` markers
       if (cleanText.startsWith("```json")) {
         cleanText = cleanText.slice(7);
@@ -244,7 +243,7 @@ export async function registerRoutes(
         cleanText = cleanText.slice(0, -3);
       }
       cleanText = cleanText.trim();
-      
+
       // CRITICAL: Try to fix common JSON issues before parsing
       // Sometimes AI returns JSON with unescaped newlines in string values
       // This attempts to parse and stringify to normalize the JSON
@@ -255,7 +254,7 @@ export async function registerRoutes(
           .replace(/(?<!\\)\n/g, '\\n')  // Escape unescaped newlines
           .replace(/(?<!\\)\r/g, '\\r')  // Escape unescaped carriage returns
           .replace(/(?<!\\)\t/g, '\\t'); // Escape unescaped tabs
-        
+
         // Try parsing the cleaned version
         JSON.parse(jsonWithEscapedControlChars);
         cleanText = jsonWithEscapedControlChars;
@@ -269,16 +268,16 @@ export async function registerRoutes(
       try {
         // First, try parsing as-is
         const rawParsed = JSON.parse(cleanText);
-        
+
         // Check if it's the new format {files: {...}}
         if (rawParsed.files && typeof rawParsed.files === 'object') {
           parsedResponse = rawParsed;
-          
+
           // Validate required fields
           if (!parsedResponse.files["index.html"] || typeof parsedResponse.files["index.html"] !== 'string') {
             throw new Error('Missing or invalid "index.html" in files');
           }
-          
+
           // Optional fields - set defaults if missing
           if (!parsedResponse.files["style.css"]) {
             parsedResponse.files["style.css"] = '';
@@ -286,8 +285,8 @@ export async function registerRoutes(
           if (!parsedResponse.files["script.js"]) {
             parsedResponse.files["script.js"] = '';
           }
-          
-        // Fallback: Check if it's the old format {html, css, js}
+
+          // Fallback: Check if it's the old format {html, css, js}
         } else if (rawParsed.html || rawParsed.css || rawParsed.js) {
           console.log('[BACKWARD COMPAT] Converting old format to new format');
           parsedResponse = {
@@ -300,12 +299,12 @@ export async function registerRoutes(
         } else {
           throw new Error('Response does not match any expected format');
         }
-        
+
       } catch (parseError: any) {
         console.error("[JSON PARSE ERROR]", parseError.message);
         console.error("[RAW RESPONSE]", cleanText.substring(0, 500));
-        
-        return res.status(500).json({ 
+
+        return res.status(500).json({
           error: "AI response format error. Please retry.",
           code: "INVALID_FORMAT"
         });
@@ -315,7 +314,7 @@ export async function registerRoutes(
       const htmlContent = parsedResponse.files["index.html"];
       const cssContent = parsedResponse.files["style.css"] || '';
       const jsContent = parsedResponse.files["script.js"] || '';
-      
+
       // Extract HTML body content for storage (remove DOCTYPE, html, head, body tags if present)
       let bodyContent = htmlContent;
       const bodyMatch = htmlContent.match(/<body[^>]*>([\s\S]*)<\/body>/i);
@@ -342,44 +341,52 @@ ${jsContent}
 </body>
 </html>`;
 
-      // STEP 5: Save to storage
+      // STEP 5: Create files array for storage
+      const projectFiles = [
+        { name: 'index.html', type: 'html', content: htmlContent },
+        { name: 'style.css', type: 'css', content: cssContent },
+        { name: 'script.js', type: 'js', content: jsContent }
+      ];
+
+      // STEP 6: Save to storage
       const generation = await storage.createGeneration({
         prompt,
         generatedHtml: combinedHtml,
         generatedCss: cssContent,
         generatedJs: jsContent,
+        files: JSON.stringify(projectFiles)
       });
 
       return res.json(generation);
     } catch (error: any) {
       console.error("Generation error:", error);
-      
+
       // Handle specific API errors
       const errorMessage = error?.message?.toLowerCase() || '';
-      
+
       // 429 Rate Limit - User-friendly message
       if (errorMessage.includes('rate limit') || errorMessage.includes('quota') || error?.status === 429) {
-        return res.status(429).json({ 
+        return res.status(429).json({
           error: "Too many requests. Please wait 30-60 seconds and try again.",
           code: "RATE_LIMIT"
         });
       }
-      
+
       if (errorMessage.includes('api key') || error?.status === 401 || error?.status === 403) {
-        return res.status(401).json({ 
+        return res.status(401).json({
           error: "Invalid API key. Please check your OpenRouter API key configuration.",
           code: "INVALID_API_KEY"
         });
       }
-      
+
       if (errorMessage.includes('empty response') || error?.code === 'EMPTY_RESPONSE') {
-        return res.status(500).json({ 
+        return res.status(500).json({
           error: "AI returned an empty response. Please try again.",
           code: "EMPTY_RESPONSE"
         });
       }
 
-      return res.status(500).json({ 
+      return res.status(500).json({
         error: "Failed to generate website. Please try again.",
         code: "GENERATION_FAILED"
       });

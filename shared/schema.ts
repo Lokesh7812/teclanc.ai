@@ -22,8 +22,15 @@ export const generations = pgTable("generations", {
   generatedHtml: text("generated_html").notNull(),
   generatedCss: text("generated_css"),
   generatedJs: text("generated_js"),
+  files: text("files").default("[]"), // Stored as JSON string
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+export type ProjectFile = {
+  name: string;
+  type: 'html' | 'css' | 'js';
+  content: string;
+};
 
 export const insertGenerationSchema = createInsertSchema(generations).omit({
   id: true,
